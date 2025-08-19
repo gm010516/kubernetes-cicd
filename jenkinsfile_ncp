@@ -1,0 +1,113 @@
+
+pipeline {
+  agent {
+    kubernetes {
+      yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  name: buildah
+spec:
+  containers:
+  - name: buildah
+    image: quay.io/buildah/stable:v1.23.1
+    command:
+    - cat
+    tty: true
+    securityContext:
+      privileged: true
+    volumeMounts:
+      - name: varlibcontainers
+        mountPath: /var/lib/containers
+  - name: git
+    image: alpine/git
+    command:
+    - cat
+    tty: true
+  volumes:
+    - name: varlibcontainers
+      emptyDir: {}
+'''   
+    }
+  }
+  options {
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    durabilityHint('PERFORMANCE_OPTIMIZED')
+    disableConcurrentBuilds()
+  }
+  environment {
+    IMAGE_NAME = 'spring-music'
+    IMAGE_URL = 'contest-test.kr.ncr.ntruss.com'
+    MAJOR_VERSION = '2'
+    MINOR_VERSION = "${env.BUILD_NUMBER}" 
+    IMAGE_CREDS=credentials('ncp') 
+    
+    CODE_URL = '133.186.152.61:32688/root/spring-music.git'
+    CODE_BRANCH = 'main' 
+    CODE_CREDENTIAL = 'gitlab' 
+    
+    MANIFEST_URL = '133.186.152.61:32688/root/cicd.git' 
+    MANIFEST_BRANCH = 'main' 
+    MANIFEST_CREDENTIAL = 'gitlab'
+    USER_NAME = 'gyungmin' 
+    USER_EMAIL = 'mi568977@gmail.com'
+  }
+  stages {
+    stage('Git Clone') {
+        steps {
+            git branch: "${CODE_BRANCH}", credentialsId: "${CODE_CREDENTIAL}", url: "http://${CODE_URL}"
+            stash name: 'workspace-stash', includes: '**/*'
+        }
+    }
+    stage('Build with Buildah') {
+      steps {
+        container('buildah') {
+          unstash 'workspace-stash'
+          script {
+            sh '''
+                buildah build -t ${IMAGE_URL}/${IMAGE_NAME}:${MAJOR_VERSION}.${MINOR_VERSION} .
+            ''' 
+          }
+        }
+      }
+    }
+    stage('Push to Registry') {
+      steps {
+        container('buildah') {
+          script { 
+            sh '''
+                echo $IMAGE_CREDS_PSW | buildah login -u $IMAGE_CREDS_USR --password-stdin ${IMAGE_URL}
+                buildah push ${IMAGE_URL}/${IMAGE_NAME}:${MAJOR_VERSION}.${MINOR_VERSION}
+            '''
+          }
+        }
+      }
+    }
+    stage('Manifest Update') {
+      steps {
+        container('git') {
+          withCredentials([usernamePassword(credentialsId: "${MANIFEST_CREDENTIAL}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASSWORD')]) {
+              script {
+                  sh '''
+                    git clone http://$GIT_USER:$GIT_PASSWORD@${MANIFEST_URL}
+                    chmod -R 777 cicd
+                  '''
+                  dir('cicd/springmusic') {
+                      sh '''
+                        git fetch origin
+                        git checkout -b ${MANIFEST_BRANCH} origin/${MANIFEST_BRANCH} || git checkout ${MANIFEST_BRANCH}
+                        sed -i "s|${IMAGE_NAME}:.*|${IMAGE_NAME}:${MAJOR_VERSION}.${MINOR_VERSION}|g" deployment.yml
+                        git config user.name "${USER_NAME}"
+                        git config user.email "${USER_EMAIL}"
+                        git add deployment.yml
+                        git commit -m "Update image tag to ${MAJOR_VERSION}.${MINOR_VERSION}"
+                        git push origin ${MANIFEST_BRANCH}
+                      '''
+                  }
+              }
+          }
+        }
+      }
+    }
+  }
+}

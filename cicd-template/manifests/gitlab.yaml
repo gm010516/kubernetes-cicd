@@ -1,0 +1,205 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitlab-config
+  namespace: cicd
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitlab-data
+  namespace: cicd
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata: 
+  name: gitlab-root-password
+  namespace: cicd
+type: Opaque
+stringData:
+  password: ""
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitlab
+  namespace: cicd
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitlab-secret-editor
+  namespace: cicd
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "patch", "create"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitlab-secret-editor-binding
+  namespace: cicd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gitlab-secret-editor
+subjects:
+- kind: ServiceAccount
+  name: gitlab
+  namespace: cicd
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab
+  namespace: cicd
+  labels:
+    app: gitlab
+spec:
+  selector:
+    matchLabels:
+      app: gitlab
+  template:
+    metadata:
+      labels:
+        app: gitlab
+    spec:
+      initContainers:
+      - name: init-gitlab-password
+        image: bitnami/kubectl:1.27
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "[INIT Setting up API access..."
+          API_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+          TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          echo "[INIT] Checking if password already exists..."
+          if kubectl --server=$API_SERVER --token=$TOKEN --certificate-authority=$CACERT \
+            get secret gitlab-root-password -n cicd -o jsonpath="{.data.password}" | grep -q .; then
+            echo "[INIT] Password already exists. Skipping."
+          else
+            echo "[INIT] Generating random password..."
+            PASS=$(head -c 12 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+            kubectl --server=$API_SERVER --token=$TOKEN --certificate-authority=$CACERT \
+              patch secret gitlab-root-password -n cicd --type='merge' -p "{\"data\":{\"password\":\"$(echo -n $PASS | base64)\"}}"
+            echo "[INIT] Password generated and patched."
+          fi
+        volumeMounts:
+        - name: kube-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        env:
+        - name: KUBECONFIG
+          value: ""
+      containers:
+      - env:
+        - name: GITLAB_OMNIBUS_CONFIG
+          value: ""
+        - name: GITLAB_SKIP_UNMIGRATED_DATA_CHECK
+          value: "true"
+        - name: GITLAB_INITIAL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gitlab-root-password
+              key: password
+        image: gitlab/gitlab-ce:15.5.9-ce.0
+        imagePullPolicy: IfNotPresent
+        name: gitlab
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          export GITLAB_OMNIBUS_CONFIG="external_url 'http://gitlab-http.cicd.svc.cluster.local'; \
+            gitlab_rails['initial_root_password']='${GITLAB_INITIAL_PASSWORD}'; \
+            letsencrypt['enable'] = false; \
+            grafana['enable'] = false; \
+            prometheus_monitoring['enable'] = false"
+          exec /assets/wrapper
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        - containerPort: 22
+          protocol: TCP
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /etc/gitlab
+          name: gitlab-config-volume
+        - mountPath: /var/opt/gitlab
+          name: gitlab-data-volume
+      restartPolicy: Always
+      serviceAccount: gitlab
+      automountServiceAccountToken: true
+      volumes:
+      - name: gitlab-config-volume
+        persistentVolumeClaim:
+          claimName: gitlab-config
+      - name: gitlab-data-volume
+        persistentVolumeClaim:
+          claimName: gitlab-data
+      - name: kube-api-access
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+                #audience: api
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitlab
+  namespace: cicd
+  labels:
+    app: gitlab
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  - name: ssh
+    port: 22
+    protocol: TCP
+    targetPort: 22
+  selector:
+    app: gitlab
+  type: NodePort
