@@ -6,6 +6,9 @@
 
 <br>
 
+## 파이프라인 구성 예시
+<img width="1675" height="985" alt="image" src="https://github.com/user-attachments/assets/9343e482-9f46-4993-b50a-2bf06b997506" />
+
 ## Install
 
 - CI/CD 서비스 배포
