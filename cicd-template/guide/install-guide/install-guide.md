@@ -44,7 +44,7 @@
 ##### 아래의 명령어를 실행하여 설정 파일을 다운로드한다.
 
     $ cd ~ 
-    $ git clone https://github.com/soyoung1122/cicd-template.git # 추후 변경
+    $ git clone https://github.com/gm010516/kubernetes-cicd.git
 
 ##### 다운로드를 확인한다.
 
